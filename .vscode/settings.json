@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "gatt.h": "c",
+        "lbs.h": "c"
+    }
+}
