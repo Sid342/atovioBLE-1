@@ -39,7 +39,7 @@ LOG_MODULE_REGISTER(pwm_led_control, LOG_LEVEL_INF);
 
 #define VOLTAGE_SHUTDOWN_MV     3100  // 3.1V shutdown threshold
 #define VTG_THRESH_TOSAVETIME   3200  // 3.2V
-#define BTRY_LOW_PCT            20           // 20% battery considered low
+#define BTRY_LOW_PCT            90           // 20% battery considered low
 #define DFU_FLAG_ID             10  // Unique ID for our DFU flag
 #define BUTTON_HOLD_DISCONNECT  3000
 
@@ -163,6 +163,17 @@ static void blink_red_led_twice(void);
 static int  save_mode_times(void);
 static void set_ionizer(bool on);
 static void blink_all_leds(uint8_t count, uint32_t on_time_ms, uint32_t off_time_ms);
+
+// Function declarations
+static void programOff(void);
+static void programNorm(void);
+static void programTurbo(void);
+static void programOffCharging(void);
+static void programNormCharging(void);
+static void programTurboCharging(void);
+static void handleLowBatteryBreathing(void);
+static void process_mode_change(void);
+static void update_mode_string_and_ionizer(void);
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -536,16 +547,22 @@ static void update_active_led(void)
     bool charging = (gpio_pin_get_dt(&charger_gpio) == 1);
     static int last_battery_percent = -1; // Track previous battery percentage
     
+    //  static bool last_charge_state_check = false;...............................//Comment out all line of code in this function for just one green breathe
+
     // Check if charging state OR battery percentage changed
     if (charging != last_charging_state || battery_percent != last_battery_percent) {
+        
+        //  bool charging_state_changed = (charging != last_charging_state);
         last_charging_state = charging;
         last_battery_percent = battery_percent; // Store current battery percentage
 
         if (charging) {
             active_ch = 1;  // Green LED when charging
+            // if (charging_state_changed) {
             current_duty = 0;
             rising = true;
             breath_count = 0;
+            // }
         } else {
             // If not charging, check battery percentage
             if (battery_percent < BTRY_LOW_PCT) {
@@ -553,12 +570,13 @@ static void update_active_led(void)
             } else {
                 active_ch = 0;  // Blue LED when battery is not low
             }
+            //  if (charging_state_changed) {
             current_duty = 0; // Reset duty cycle
             rising = true; // Start breathing
+            //  }
         }
         
-        LOG_INF("LED updated: Charging=%d, Battery=%d%%, Active LED=%s",
-               charging, battery_percent, 
+        LOG_INF("LED updated: Charging=%d, Battery=%d%%, Active LED=%s",charging, battery_percent, 
                (active_ch == 0) ? "Blue" : (active_ch == 1) ? "Green" : "Red");
     }
 }
@@ -641,46 +659,57 @@ static void debounce_work(struct k_work *work)
 
             button_held = false; // Button released before hold time
             k_work_cancel_delayable(&button_hold_work);
+           
             // Check if battery is critical - blink red and prevent mode change
-
-    if (read_battery_voltage_mv() < VOLTAGE_SHUTDOWN_MV) {
-        blink_red_led_twice();
-        LOG_INF("Battery critical - cannot change mode");
-        return;
-    }
-
-            // NO TURBO mode when low battery
-            if (mode == modeNormal && battery_percent < BTRY_LOW_PCT && !last_charging_state) {
-                mode = modeOff;
-                strcpy((char *)mode_string, "OFF");
-
-            } else {
-                mode = (mode + 1) % MODE_COUNT;
-                current_duty = 0;
-                rising = true;
-                breath_count = 0;
-                switch (mode) {
-                    case modeOff:   strcpy((char *)mode_string, "OFF"); 
-                                    set_ionizer(false);
-                                    break;
-                       
-                    case modeNormal: strcpy((char *)mode_string, "Normal"); 
-                                     set_ionizer(true);
-                                     k_work_schedule(&slow_mode_toggle_work, SLOW_MODE_TOGGLE_TIME);
-                                     break;
-
-                    case modeTurbo: strcpy((char *)mode_string, "Turbo"); 
-                                    set_ionizer(true);
-                                    break;
-                }
+            if (read_battery_voltage_mv() < VOLTAGE_SHUTDOWN_MV) {
+                blink_red_led_twice();
+                return;
             }
 
-            // FIX: FORCE UPDATE ACTIVE LED ON MODE CHANGE
-            update_active_led();
-
-            notify_mode(); // Notify Bluetooth clients of mode change
-            mode_start_time = k_uptime_get_32();
+            process_mode_change();// Change mode on button release
         }
+    }
+}
+
+static void process_mode_change(void)
+{
+    // NO TURBO mode when low battery
+    if (mode == modeNormal && battery_percent < BTRY_LOW_PCT && !last_charging_state) {
+        mode = modeOff;
+        strcpy((char *)mode_string, "OFF");
+    } else {
+        mode = (mode + 1) % MODE_COUNT;
+        current_duty = 0;
+        rising = true;
+        breath_count = 0;
+        update_mode_string_and_ionizer();
+    }
+
+    // FIX: FORCE UPDATE ACTIVE LED ON MODE CHANGE
+    update_active_led();
+
+    notify_mode(); // Notify Bluetooth clients of mode change
+    mode_start_time = k_uptime_get_32();
+}
+
+static void update_mode_string_and_ionizer(void)
+{
+    switch (mode) {
+        case modeOff:
+            strcpy((char *)mode_string, "OFF");
+            set_ionizer(false);
+            break;
+            
+        case modeNormal:
+            strcpy((char *)mode_string, "Normal");
+            set_ionizer(true);
+            k_work_schedule(&slow_mode_toggle_work, SLOW_MODE_TOGGLE_TIME);
+            break;
+
+        case modeTurbo:
+            strcpy((char *)mode_string, "Turbo");
+            set_ionizer(true);
+            break;
     }
 }
 
@@ -752,7 +781,7 @@ static void duty_thread(void)
     while (1) {
         update_active_led();
         
-          // Skip LED control if mode is invalid (during blinking)
+        // Skip LED control if mode is invalid (during blinking)
         if (mode >= MODE_COUNT) {  // MODE_COUNT is 3, so 99 is invalid
             k_sleep(K_MSEC(100));
             continue;
@@ -765,81 +794,118 @@ static void duty_thread(void)
             mode_start_time = k_uptime_get_32(); // Reset start time for the next interval
         }
 
-        // NOT charging
+        // Route to appropriate program based on charging state and mode
         if (!last_charging_state) {
-            if (mode == modeOff) {
-                set_pwm(0, 0);
-                set_pwm(1, 0);
-                set_pwm(2, 0); // Turn off all LEDs
-                k_sleep(K_MSEC(100));
-                continue;
+            // Not charging programs
+            switch (mode) {
+                case modeOff:    programOff(); break;
+                case modeNormal: programNorm(); break;
+                case modeTurbo:  programTurbo(); break;
+                default: break;
             }
-
-            uint32_t interval = (mode == modeNormal) ? 42 : 8;
-            k_sleep(K_MSEC(interval));
-
-            // Check battery percentage and breathe red and blue LEDs if below 20%
-            if (battery_percent < BTRY_LOW_PCT) {
-                // Prioritize breathing red LED first
-                if (active_ch == 2) { // Red is active
-                    if (led_breath_step(2, max_duty[2], &rising, &current_duty)) {
-                        active_ch = 0;  // Switch to blue
-                        rising = true;
-                        current_duty = 0;
-                    }
-                } else { // Blue is active
-                    if (led_breath_step(0, max_duty[0], &rising, &current_duty)) {
-                        active_ch = 2;  // Switch to red
-                        rising = true;
-                        current_duty = 0;
-                    }
-                }
-                continue;
+        } else {
+            // Charging programs
+            switch (mode) {
+                case modeOff:    programOffCharging(); break;
+                case modeNormal: programNormCharging(); break;
+                case modeTurbo:  programTurboCharging(); break;
+                default: break;
             }
-
-            // Normal breathing for active LED
-            led_breath_step(active_ch, max_duty[active_ch], &rising, &current_duty);
-            continue;
         }
+    }
+}
 
-        // Charging behavior
-        switch (mode) {
-            case modeOff:
-                k_sleep(K_MSEC(42));
-                led_breath_step(1, max_duty[1], &rising, &current_duty); // Green LED
-                break;
+// Program implementations
+static void programOff(void)
+{
+    set_pwm(0, 0);
+    set_pwm(1, 0);
+    set_pwm(2, 0); // Turn off all LEDs
+    k_sleep(K_MSEC(100));
+}
 
-            case modeNormal:
-                k_sleep(K_MSEC(42));
-                if (led_breath_step(active_ch, max_duty[active_ch], &rising, &current_duty)) {
-                    active_ch = (active_ch == 0) ? 1 : 0;  // Toggle LED
-                }
-                break;
+static void programNorm(void)
+{
+    uint32_t interval = 42;
+    k_sleep(K_MSEC(interval));
 
-            case modeTurbo:
-                if (active_ch == 1) {  // Green LED
-                    k_sleep(K_MSEC(42));
-                    if (led_breath_step(1, max_duty[1], &rising, &current_duty)) {
-                        active_ch = 0; // Switch to blue LED
-                        breath_count = 0;
-                        rising = true;
-                        current_duty = 0;
-                    }
-                } else {  // Blue LED
-                    k_sleep(K_MSEC(8));
-                    if (led_breath_step(0, max_duty[0], &rising, &current_duty)) {
-                        breath_count++;
-                        if (breath_count >= 3) {
-                            active_ch = 1; // Switch to green LED
-                            rising = true;
-                            current_duty = 0;
-                        }
-                    }
-                }
-                break;
+    // Check battery percentage and breathe red and blue LEDs if below 20%
+    if (battery_percent < BTRY_LOW_PCT) {
+        handleLowBatteryBreathing();
+        return;
+    }
 
-            default:
-                break;
+    // Normal breathing for active LED
+    led_breath_step(active_ch, max_duty[active_ch], &rising, &current_duty);
+}
+
+static void programTurbo(void)
+{
+    uint32_t interval = 8;
+    k_sleep(K_MSEC(interval));
+
+    // Check battery percentage and breathe red and blue LEDs if below 20%
+    if (battery_percent < BTRY_LOW_PCT) {
+        handleLowBatteryBreathing();
+        return;
+    }
+
+    // Normal breathing for active LED
+    led_breath_step(active_ch, max_duty[active_ch], &rising, &current_duty);
+}
+
+static void programOffCharging(void)
+{
+    k_sleep(K_MSEC(42));
+    led_breath_step(1, max_duty[1], &rising, &current_duty); // Green LED
+}
+
+static void programNormCharging(void)
+{
+    k_sleep(K_MSEC(42));
+    if (led_breath_step(active_ch, max_duty[active_ch], &rising, &current_duty)) {
+        active_ch = (active_ch == 0) ? 1 : 0;  // Toggle LED
+    }
+}
+
+static void programTurboCharging(void)
+{
+    if (active_ch == 1) {  // Green LED
+        k_sleep(K_MSEC(42));
+        if (led_breath_step(1, max_duty[1], &rising, &current_duty)) {
+            active_ch = 0; // Switch to blue LED
+            breath_count = 0;
+            rising = true;
+            current_duty = 0;
+        }
+    } else {  // Blue LED
+        k_sleep(K_MSEC(8));
+        if (led_breath_step(0, max_duty[0], &rising, &current_duty)) {
+            breath_count++;
+            if (breath_count >= 3) {
+                active_ch = 1; // Switch to green LED
+                rising = true;
+                current_duty = 0;
+            }
+        }
+    }
+}
+
+// Helper function for low battery breathing pattern
+static void handleLowBatteryBreathing(void)
+{
+    // Prioritize breathing red LED first
+    if (active_ch == 2) { // Red is active
+        if (led_breath_step(2, max_duty[2], &rising, &current_duty)) {
+            active_ch = 0;  // Switch to blue
+            rising = true;
+            current_duty = 0;
+        }
+    } else { // Blue is active
+        if (led_breath_step(0, max_duty[0], &rising, &current_duty)) {
+            active_ch = 2;  // Switch to red
+            rising = true;
+            current_duty = 0;
         }
     }
 }
