@@ -39,7 +39,7 @@ LOG_MODULE_REGISTER(pwm_led_control, LOG_LEVEL_INF);
 
 #define VOLTAGE_SHUTDOWN_MV     3100  // 3.1V shutdown threshold
 #define VTG_THRESH_TOSAVETIME   3200  // 3.2V
-#define BTRY_LOW_PCT            20           // 20% battery considered low
+#define BTRY_LOW_PCT            90           // 20% battery considered low
 #define DFU_FLAG_ID             10  // Unique ID for our DFU flag
 #define BUTTON_HOLD_DISCONNECT  3000
 
